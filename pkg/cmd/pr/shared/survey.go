@@ -192,7 +192,7 @@ func MetadataSurvey(p Prompt, io *iostreams.IOStreams, baseRepo ghrepo.Interface
 
 	var reviewers []string
 	for _, u := range metadataResult.AssignableUsers {
-		if u.Login != metadataResult.CurrentLogin {
+		if u.Login() != metadataResult.CurrentLogin {
 			reviewers = append(reviewers, u.DisplayName())
 		}
 	}

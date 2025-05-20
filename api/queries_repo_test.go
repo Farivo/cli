@@ -526,17 +526,17 @@ func Test_RepoMilestones(t *testing.T) {
 func TestDisplayName(t *testing.T) {
 	tests := []struct {
 		name     string
-		assignee RepoAssignee
+		assignee AssignableUser
 		want     string
 	}{
 		{
 			name:     "assignee with name",
-			assignee: RepoAssignee{"123", "octocat123", "Octavious Cath"},
+			assignee: AssignableUser{"123", "octocat123", "Octavious Cath"},
 			want:     "octocat123 (Octavious Cath)",
 		},
 		{
 			name:     "assignee without name",
-			assignee: RepoAssignee{"123", "octocat123", ""},
+			assignee: AssignableUser{"123", "octocat123", ""},
 			want:     "octocat123",
 		},
 	}

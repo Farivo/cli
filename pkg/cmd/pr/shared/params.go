@@ -312,3 +312,26 @@ func (r *MeReplacer) ReplaceSlice(handles []string) ([]string, error) {
 	}
 	return res, nil
 }
+
+// CopilotReplacer resolves usages of `@copilot` to Copilot's login.
+type CopilotReplacer struct{}
+
+func NewCopilotReplacer() *CopilotReplacer {
+	return &CopilotReplacer{}
+}
+
+func (r *CopilotReplacer) replace(handle string) string {
+	if strings.EqualFold(handle, "@copilot") {
+		return api.CopilotActorLogin
+	}
+	return handle
+}
+
+// ReplaceSlice replaces usages of `@copilot` in a slice with Copilot's login.
+func (r *CopilotReplacer) ReplaceSlice(handles []string) []string {
+	res := make([]string, len(handles))
+	for i, h := range handles {
+		res[i] = r.replace(h)
+	}
+	return res
+}

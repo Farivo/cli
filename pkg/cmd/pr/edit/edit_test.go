@@ -166,9 +166,11 @@ func TestNewCmdEdit(t *testing.T) {
 			output: EditOptions{
 				SelectorArg: "23",
 				Editable: shared.Editable{
-					Assignees: shared.EditableSlice{
-						Add:    []string{"monalisa", "hubot"},
-						Edited: true,
+					Assignees: shared.EditableAssignees{
+						EditableSlice: shared.EditableSlice{
+							Add:    []string{"monalisa", "hubot"},
+							Edited: true,
+						},
 					},
 				},
 			},
@@ -180,9 +182,11 @@ func TestNewCmdEdit(t *testing.T) {
 			output: EditOptions{
 				SelectorArg: "23",
 				Editable: shared.Editable{
-					Assignees: shared.EditableSlice{
-						Remove: []string{"monalisa", "hubot"},
-						Edited: true,
+					Assignees: shared.EditableAssignees{
+						EditableSlice: shared.EditableSlice{
+							Remove: []string{"monalisa", "hubot"},
+							Edited: true,
+						},
 					},
 				},
 			},
@@ -360,10 +364,12 @@ func Test_editRun(t *testing.T) {
 						Remove: []string{"dependabot"},
 						Edited: true,
 					},
-					Assignees: shared.EditableSlice{
-						Add:    []string{"monalisa", "hubot"},
-						Remove: []string{"octocat"},
-						Edited: true,
+					Assignees: shared.EditableAssignees{
+						EditableSlice: shared.EditableSlice{
+							Add:    []string{"monalisa", "hubot"},
+							Remove: []string{"octocat"},
+							Edited: true,
+						},
 					},
 					Labels: shared.EditableSlice{
 						Add:    []string{"feature", "TODO", "bug"},
@@ -387,6 +393,7 @@ func Test_editRun(t *testing.T) {
 			httpStubs: func(reg *httpmock.Registry) {
 				mockRepoMetadata(reg, false)
 				mockPullRequestUpdate(reg)
+				mockPullRequestUpdateActorAssignees(reg)
 				mockPullRequestReviewersUpdate(reg)
 				mockPullRequestUpdateLabels(reg)
 				mockProjectV2ItemUpdate(reg)
@@ -414,10 +421,12 @@ func Test_editRun(t *testing.T) {
 						Value:  "base-branch-name",
 						Edited: true,
 					},
-					Assignees: shared.EditableSlice{
-						Add:    []string{"monalisa", "hubot"},
-						Remove: []string{"octocat"},
-						Edited: true,
+					Assignees: shared.EditableAssignees{
+						EditableSlice: shared.EditableSlice{
+							Add:    []string{"monalisa", "hubot"},
+							Remove: []string{"octocat"},
+							Edited: true,
+						},
 					},
 					Labels: shared.EditableSlice{
 						Add:    []string{"feature", "TODO", "bug"},
@@ -441,6 +450,7 @@ func Test_editRun(t *testing.T) {
 			httpStubs: func(reg *httpmock.Registry) {
 				mockRepoMetadata(reg, true)
 				mockPullRequestUpdate(reg)
+				mockPullRequestUpdateActorAssignees(reg)
 				mockPullRequestUpdateLabels(reg)
 				mockProjectV2ItemUpdate(reg)
 			},
@@ -471,10 +481,12 @@ func Test_editRun(t *testing.T) {
 						Remove: []string{"OWNER/core", "OWNER/external", "monalisa", "hubot", "dependabot"},
 						Edited: true,
 					},
-					Assignees: shared.EditableSlice{
-						Add:    []string{"monalisa", "hubot"},
-						Remove: []string{"octocat"},
-						Edited: true,
+					Assignees: shared.EditableAssignees{
+						EditableSlice: shared.EditableSlice{
+							Add:    []string{"monalisa", "hubot"},
+							Remove: []string{"octocat"},
+							Edited: true,
+						},
 					},
 					Labels: shared.EditableSlice{
 						Add:    []string{"feature", "TODO", "bug"},
@@ -500,6 +512,7 @@ func Test_editRun(t *testing.T) {
 				mockPullRequestUpdate(reg)
 				mockPullRequestReviewersUpdate(reg)
 				mockPullRequestUpdateLabels(reg)
+				mockPullRequestUpdateActorAssignees(reg)
 				mockProjectV2ItemUpdate(reg)
 			},
 			stdout: "https://github.com/OWNER/REPO/pull/123\n",
@@ -519,6 +532,7 @@ func Test_editRun(t *testing.T) {
 			httpStubs: func(reg *httpmock.Registry) {
 				mockRepoMetadata(reg, false)
 				mockPullRequestUpdate(reg)
+				mockPullRequestUpdateActorAssignees(reg)
 				mockPullRequestReviewersUpdate(reg)
 				mockPullRequestUpdateLabels(reg)
 				mockProjectV2ItemUpdate(reg)
@@ -540,6 +554,7 @@ func Test_editRun(t *testing.T) {
 			httpStubs: func(reg *httpmock.Registry) {
 				mockRepoMetadata(reg, true)
 				mockPullRequestUpdate(reg)
+				mockPullRequestUpdateActorAssignees(reg)
 				mockPullRequestUpdateLabels(reg)
 				mockProjectV2ItemUpdate(reg)
 			},
@@ -561,8 +576,47 @@ func Test_editRun(t *testing.T) {
 				mockRepoMetadata(reg, false)
 				mockPullRequestUpdate(reg)
 				mockPullRequestReviewersUpdate(reg)
+				mockPullRequestUpdateActorAssignees(reg)
 				mockPullRequestUpdateLabels(reg)
 				mockProjectV2ItemUpdate(reg)
+			},
+			stdout: "https://github.com/OWNER/REPO/pull/123\n",
+		},
+		{
+			name: "Legacy assignee users are fetched and updated on unsupported GitHub Hosts",
+			input: &EditOptions{
+				Detector:    &fd.DisabledDetectorMock{},
+				SelectorArg: "123",
+				Finder: shared.NewMockFinder("123", &api.PullRequest{
+					URL: "https://github.com/OWNER/REPO/pull/123",
+				}, ghrepo.New("OWNER", "REPO")),
+				Interactive: false,
+				Editable: shared.Editable{
+					Assignees: shared.EditableAssignees{
+						EditableSlice: shared.EditableSlice{
+							Add:    []string{"monalisa", "hubot"},
+							Remove: []string{"octocat"},
+							Edited: true,
+						},
+					},
+				},
+				Fetcher: testFetcher{},
+			},
+			httpStubs: func(reg *httpmock.Registry) {
+				// Notice there is no call to mockReplaceActorsForAssignable()
+				// and no GraphQL call to RepositoryAssignableActors below.
+				reg.Register(
+					httpmock.GraphQL(`query RepositoryAssignableUsers\b`),
+					httpmock.StringResponse(`
+					{ "data": { "repository": { "assignableUsers": {
+						"nodes": [
+							{ "login": "hubot", "id": "HUBOTID" },
+							{ "login": "MonaLisa", "id": "MONAID" }
+						],
+						"pageInfo": { "hasNextPage": false }
+					} } } }
+					`))
+				mockPullRequestUpdate(reg)
 			},
 			stdout: "https://github.com/OWNER/REPO/pull/123\n",
 		},
@@ -579,9 +633,11 @@ func Test_editRun(t *testing.T) {
 			tt.httpStubs(reg)
 
 			httpClient := func() (*http.Client, error) { return &http.Client{Transport: reg}, nil }
+			baseRepo := func() (ghrepo.Interface, error) { return ghrepo.New("OWNER", "REPO"), nil }
 
 			tt.input.IO = ios
 			tt.input.HttpClient = httpClient
+			tt.input.BaseRepo = baseRepo
 
 			err := editRun(tt.input)
 			assert.NoError(t, err)
@@ -593,16 +649,16 @@ func Test_editRun(t *testing.T) {
 
 func mockRepoMetadata(reg *httpmock.Registry, skipReviewers bool) {
 	reg.Register(
-		httpmock.GraphQL(`query RepositoryAssignableUsers\b`),
+		httpmock.GraphQL(`query RepositoryAssignableActors\b`),
 		httpmock.StringResponse(`
-		{ "data": { "repository": { "assignableUsers": {
-			"nodes": [
-				{ "login": "hubot", "id": "HUBOTID" },
-				{ "login": "MonaLisa", "id": "MONAID" }
-			],
-			"pageInfo": { "hasNextPage": false }
-		} } } }
-		`))
+			{ "data": { "repository": { "suggestedActors": {
+				"nodes": [
+					{ "login": "hubot", "id": "HUBOTID", "__typename": "Bot" },
+					{ "login": "MonaLisa", "id": "MONAID", "__typename": "User" }
+				],
+				"pageInfo": { "hasNextPage": false }
+			} } } }
+			`))
 	reg.Register(
 		httpmock.GraphQL(`query RepositoryLabelList\b`),
 		httpmock.StringResponse(`
@@ -703,6 +759,15 @@ func mockPullRequestUpdate(reg *httpmock.Registry) {
 	reg.Register(
 		httpmock.GraphQL(`mutation PullRequestUpdate\b`),
 		httpmock.StringResponse(`{}`))
+}
+
+func mockPullRequestUpdateActorAssignees(reg *httpmock.Registry) {
+	reg.Register(
+		httpmock.GraphQL(`mutation ReplaceActorsForAssignable\b`),
+		httpmock.GraphQLMutation(`
+		{ "data": { "replaceActorsForAssignable": { "__typename": "" } } }`,
+			func(inputs map[string]interface{}) {}),
+	)
 }
 
 func mockPullRequestReviewersUpdate(reg *httpmock.Registry) {

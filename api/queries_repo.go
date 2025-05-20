@@ -146,6 +146,18 @@ type GitHubUser struct {
 	Name  string `json:"name"`
 }
 
+// Actor is a superset of User and Bot, among others.
+// At the time of writing, some of these fields
+// are not directly supported by the Actor type and
+// instead are only available on the User or Bot types
+// directly.
+type Actor struct {
+	ID       string `json:"id"`
+	Login    string `json:"login"`
+	Name     string `json:"name"`
+	TypeName string `json:"__typename"`
+}
+
 // BranchRef is the branch name in a GitHub repository
 type BranchRef struct {
 	Name string `json:"name"`
@@ -674,13 +686,14 @@ func RepoFindForks(client *Client, repo ghrepo.Interface, limit int) ([]*Reposit
 }
 
 type RepoMetadataResult struct {
-	CurrentLogin    string
-	AssignableUsers []RepoAssignee
-	Labels          []RepoLabel
-	Projects        []RepoProject
-	ProjectsV2      []ProjectV2
-	Milestones      []RepoMilestone
-	Teams           []OrgTeam
+	CurrentLogin     string
+	AssignableUsers  []AssignableUser
+	AssignableActors []AssignableActor
+	Labels           []RepoLabel
+	Projects         []RepoProject
+	ProjectsV2       []ProjectV2
+	Milestones       []RepoMilestone
+	Teams            []OrgTeam
 }
 
 func (m *RepoMetadataResult) MembersToIDs(names []string) ([]string, error) {
@@ -688,12 +701,27 @@ func (m *RepoMetadataResult) MembersToIDs(names []string) ([]string, error) {
 	for _, assigneeLogin := range names {
 		found := false
 		for _, u := range m.AssignableUsers {
-			if strings.EqualFold(assigneeLogin, u.Login) {
-				ids = append(ids, u.ID)
+			if strings.EqualFold(assigneeLogin, u.Login()) {
+				ids = append(ids, u.ID())
 				found = true
 				break
 			}
 		}
+
+		// Look for ID in assignable actors if not found in assignable users
+		for _, a := range m.AssignableActors {
+			if strings.EqualFold(assigneeLogin, a.Login()) {
+				ids = append(ids, a.ID())
+				found = true
+				break
+			}
+			if strings.EqualFold(assigneeLogin, a.DisplayName()) {
+				ids = append(ids, a.ID())
+				found = true
+				break
+			}
+		}
+
 		if !found {
 			return nil, fmt.Errorf("'%s' not found", assigneeLogin)
 		}
@@ -885,12 +913,13 @@ func (m *RepoMetadataResult) Merge(m2 *RepoMetadataResult) {
 }
 
 type RepoMetadataInput struct {
-	Assignees  bool
-	Reviewers  bool
-	Labels     bool
-	ProjectsV1 bool
-	ProjectsV2 bool
-	Milestones bool
+	Assignees      bool
+	ActorAssignees bool
+	Reviewers      bool
+	Labels         bool
+	ProjectsV1     bool
+	ProjectsV2     bool
+	Milestones     bool
 }
 
 // RepoMetadata pre-fetches the metadata for attaching to issues and pull requests
@@ -899,14 +928,37 @@ func RepoMetadata(client *Client, repo ghrepo.Interface, input RepoMetadataInput
 	var g errgroup.Group
 
 	if input.Assignees || input.Reviewers {
-		g.Go(func() error {
-			users, err := RepoAssignableUsers(client, repo)
-			if err != nil {
-				err = fmt.Errorf("error fetching assignees: %w", err)
-			}
-			result.AssignableUsers = users
-			return err
-		})
+		if input.ActorAssignees {
+			g.Go(func() error {
+				actors, err := RepoAssignableActors(client, repo)
+				if err != nil {
+					return fmt.Errorf("error fetching assignable actors: %w", err)
+				}
+				result.AssignableActors = actors
+
+				// Filter actors for users to use for pull request reviewers,
+				// skip retrieving the same info through RepoAssignableUsers().
+				var users []AssignableUser
+				for _, a := range actors {
+					if _, ok := a.(AssignableUser); !ok {
+						continue
+					}
+					users = append(users, a.(AssignableUser))
+				}
+				result.AssignableUsers = users
+				return nil
+			})
+		} else {
+			// Not using Actors, fetch legacy assignable users.
+			g.Go(func() error {
+				users, err := RepoAssignableUsers(client, repo)
+				if err != nil {
+					err = fmt.Errorf("error fetching assignable users: %w", err)
+				}
+				result.AssignableUsers = users
+				return err
+			})
+		}
 	}
 
 	if input.Reviewers {
@@ -1070,12 +1122,16 @@ func RepoResolveMetadataIDs(client *Client, repo ghrepo.Interface, input RepoRes
 				result.Teams = append(result.Teams, t)
 			}
 		default:
-			user := RepoAssignee{}
+			user := struct {
+				Id    string
+				Login string
+				Name  string
+			}{}
 			err := json.Unmarshal(v, &user)
 			if err != nil {
 				return result, err
 			}
-			result.AssignableUsers = append(result.AssignableUsers, user)
+			result.AssignableUsers = append(result.AssignableUsers, NewAssignableUser(user.Id, user.Login, user.Name))
 		}
 	}
 
@@ -1127,26 +1183,99 @@ func RepoProjects(client *Client, repo ghrepo.Interface) ([]RepoProject, error) 
 	return projects, nil
 }
 
-type RepoAssignee struct {
-	ID    string
-	Login string
-	Name  string
+// Expected login for Copilot when retrieved as an Actor
+// This is returned from assignable actors and issue/pr assigned actors.
+// We use this to check if the actor is Copilot.
+const CopilotActorLogin = "copilot-swe-agent"
+
+type AssignableActor interface {
+	DisplayName() string
+	ID() string
+	Login() string
+
+	sealedAssignableActor()
+}
+
+// Always a user
+type AssignableUser struct {
+	id    string
+	login string
+	name  string
+}
+
+func NewAssignableUser(id, login, name string) AssignableUser {
+	return AssignableUser{
+		id:    id,
+		login: login,
+		name:  name,
+	}
 }
 
 // DisplayName returns a formatted string that uses Login and Name to be displayed e.g. 'Login (Name)' or 'Login'
-func (ra RepoAssignee) DisplayName() string {
-	if ra.Name != "" {
-		return fmt.Sprintf("%s (%s)", ra.Login, ra.Name)
+func (u AssignableUser) DisplayName() string {
+	if u.name != "" {
+		return fmt.Sprintf("%s (%s)", u.login, u.name)
 	}
-	return ra.Login
+	return u.login
 }
 
+func (u AssignableUser) ID() string {
+	return u.id
+}
+
+func (u AssignableUser) Login() string {
+	return u.login
+}
+
+func (u AssignableUser) Name() string {
+	return u.name
+}
+
+func (u AssignableUser) sealedAssignableActor() {}
+
+type AssignableBot struct {
+	id    string
+	login string
+}
+
+func NewAssignableBot(id, login string) AssignableBot {
+	return AssignableBot{
+		id:    id,
+		login: login,
+	}
+}
+
+func (b AssignableBot) DisplayName() string {
+	if b.login == CopilotActorLogin {
+		return "Copilot (AI)"
+	}
+	return b.Login()
+}
+
+func (b AssignableBot) ID() string {
+	return b.id
+}
+
+func (b AssignableBot) Login() string {
+	return b.login
+}
+
+func (b AssignableBot) Name() string {
+	return ""
+}
+
+func (b AssignableBot) sealedAssignableActor() {}
+
 // RepoAssignableUsers fetches all the assignable users for a repository
-func RepoAssignableUsers(client *Client, repo ghrepo.Interface) ([]RepoAssignee, error) {
+func RepoAssignableUsers(client *Client, repo ghrepo.Interface) ([]AssignableUser, error) {
 	type responseData struct {
 		Repository struct {
 			AssignableUsers struct {
-				Nodes    []RepoAssignee
+				Nodes []struct {
+					ID    string
+					Login string
+					Name  string
+				}
 				PageInfo struct {
 					HasNextPage bool
 					EndCursor   string
@@ -1161,7 +1290,7 @@ func RepoAssignableUsers(client *Client, repo ghrepo.Interface) ([]RepoAssignee,
 		"endCursor": (*githubv4.String)(nil),
 	}
 
-	var users []RepoAssignee
+	var users []AssignableUser
 	for {
 		var query responseData
 		err := client.Query(repo.RepoHost(), "RepositoryAssignableUsers", &query, variables)
@@ -1169,7 +1298,15 @@ func RepoAssignableUsers(client *Client, repo ghrepo.Interface) ([]RepoAssignee,
 			return nil, err
 		}
 
-		users = append(users, query.Repository.AssignableUsers.Nodes...)
+		for _, node := range query.Repository.AssignableUsers.Nodes {
+			user := AssignableUser{
+				id:    node.ID,
+				login: node.Login,
+				name:  node.Name,
+			}
+
+			users = append(users, user)
+		}
 		if !query.Repository.AssignableUsers.PageInfo.HasNextPage {
 			break
 		}
@@ -1177,6 +1314,72 @@ func RepoAssignableUsers(client *Client, repo ghrepo.Interface) ([]RepoAssignee,
 	}
 
 	return users, nil
+}
+
+// RepoAssignableActors fetches all the assignable actors for a repository on
+// GitHub hosts that support Actor assignees.
+func RepoAssignableActors(client *Client, repo ghrepo.Interface) ([]AssignableActor, error) {
+	type responseData struct {
+		Repository struct {
+			SuggestedActors struct {
+				Nodes []struct {
+					User struct {
+						ID       string
+						Login    string
+						Name     string
+						TypeName string `graphql:"__typename"`
+					} `graphql:"... on User"`
+					Bot struct {
+						ID       string
+						Login    string
+						TypeName string `graphql:"__typename"`
+					} `graphql:"... on Bot"`
+				}
+				PageInfo struct {
+					HasNextPage bool
+					EndCursor   string
+				}
+			} `graphql:"suggestedActors(first: 100, after: $endCursor, capabilities: CAN_BE_ASSIGNED)"`
+		} `graphql:"repository(owner: $owner, name: $name)"`
+	}
+
+	variables := map[string]interface{}{
+		"owner":     githubv4.String(repo.RepoOwner()),
+		"name":      githubv4.String(repo.RepoName()),
+		"endCursor": (*githubv4.String)(nil),
+	}
+
+	var actors []AssignableActor
+	for {
+		var query responseData
+		err := client.Query(repo.RepoHost(), "RepositoryAssignableActors", &query, variables)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, node := range query.Repository.SuggestedActors.Nodes {
+			if node.User.TypeName == "User" {
+				actor := AssignableUser{
+					id:    node.User.ID,
+					login: node.User.Login,
+					name:  node.User.Name,
+				}
+				actors = append(actors, actor)
+			} else if node.Bot.TypeName == "Bot" {
+				actor := AssignableBot{
+					id:    node.Bot.ID,
+					login: node.Bot.Login,
+				}
+				actors = append(actors, actor)
+			}
+		}
+
+		if !query.Repository.SuggestedActors.PageInfo.HasNextPage {
+			break
+		}
+		variables["endCursor"] = githubv4.String(query.Repository.SuggestedActors.PageInfo.EndCursor)
+	}
+	return actors, nil
 }
 
 type RepoLabel struct {

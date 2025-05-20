@@ -3,6 +3,7 @@ package edit
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/MakeNowJust/heredoc"
 	"github.com/cli/cli/v2/api"
@@ -20,15 +21,14 @@ import (
 type EditOptions struct {
 	HttpClient func() (*http.Client, error)
 	IO         *iostreams.IOStreams
-	// TODO projectsV1Deprecation
-	// Remove this detector since it is only used for test validation.
-	Detector fd.Detector
 
 	Finder          shared.PRFinder
 	Surveyor        Surveyor
 	Fetcher         EditableOptionsFetcher
 	EditorRetriever EditorRetriever
 	Prompter        shared.EditPrompter
+	Detector        fd.Detector
+	BaseRepo        func() (ghrepo.Interface, error)
 
 	SelectorArg string
 	Interactive bool
@@ -60,12 +60,21 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Comman
 
 			Editing a pull request's projects requires authorization with the %[1]sproject%[1]s scope.
 			To authorize, run %[1]sgh auth refresh -s project%[1]s.
+
+			The %[1]s--add-assignee%[1]s and %[1]s--remove-assignee%[1]s flags both support
+			the following special values:
+			- %[1]s@me%[1]s: assign or unassign yourself
+			- %[1]s@copilot%[1]s: assign or unassign Copilot (not supported on GitHub Enterprise Server)
+
+			The %[1]s--add-reviewer%[1]s and %[1]s--remove-reviewer%[1]s flags do not support
+			these special values.
 		`, "`"),
 		Example: heredoc.Doc(`
 			$ gh pr edit 23 --title "I found a bug" --body "Nothing works"
 			$ gh pr edit 23 --add-label "bug,help wanted" --remove-label "core"
 			$ gh pr edit 23 --add-reviewer monalisa,hubot  --remove-reviewer myorg/team-name
 			$ gh pr edit 23 --add-assignee "@me" --remove-assignee monalisa,hubot
+			$ gh pr edit 23 --add-assignee "@copilot"
 			$ gh pr edit 23 --add-project "Roadmap" --remove-project v1,v2
 			$ gh pr edit 23 --milestone "Version 1"
 			$ gh pr edit 23 --remove-milestone
@@ -73,6 +82,7 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Comman
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.Finder = shared.NewFinder(f)
+			opts.BaseRepo = f.BaseRepo
 
 			if len(args) > 0 {
 				opts.SelectorArg = args[0]
@@ -196,9 +206,36 @@ func NewCmdEdit(f *cmdutil.Factory, runF func(*EditOptions) error) *cobra.Comman
 func editRun(opts *EditOptions) error {
 	findOptions := shared.FindOptions{
 		Selector: opts.SelectorArg,
-		Fields:   []string{"id", "url", "title", "body", "baseRefName", "reviewRequests", "assignees", "labels", "projectCards", "projectItems", "milestone"},
+		Fields:   []string{"id", "url", "title", "body", "baseRefName", "reviewRequests", "labels", "projectCards", "projectItems", "milestone"},
 		Detector: opts.Detector,
 	}
+
+	httpClient, err := opts.HttpClient()
+	if err != nil {
+		return err
+	}
+
+	if opts.Detector == nil {
+		baseRepo, err := opts.BaseRepo()
+		if err != nil {
+			return err
+		}
+
+		cachedClient := api.NewCachedHTTPClient(httpClient, time.Hour*24)
+		opts.Detector = fd.NewDetector(cachedClient, baseRepo.RepoHost())
+	}
+
+	issueFeatures, err := opts.Detector.IssueFeatures()
+	if err != nil {
+		return err
+	}
+
+	if issueFeatures.ActorIsAssignable {
+		findOptions.Fields = append(findOptions.Fields, "assignedActors")
+	} else {
+		findOptions.Fields = append(findOptions.Fields, "assignees")
+	}
+
 	pr, repo, err := opts.Finder.Find(findOptions)
 	if err != nil {
 		return err
@@ -210,7 +247,12 @@ func editRun(opts *EditOptions) error {
 	editable.Body.Default = pr.Body
 	editable.Base.Default = pr.BaseRefName
 	editable.Reviewers.Default = pr.ReviewRequests.Logins()
-	editable.Assignees.Default = pr.Assignees.Logins()
+	if issueFeatures.ActorIsAssignable {
+		editable.Assignees.ActorAssignees = true
+		editable.Assignees.Default = pr.AssignedActors.DisplayNames()
+	} else {
+		editable.Assignees.Default = pr.Assignees.Logins()
+	}
 	editable.Labels.Default = pr.Labels.Names()
 	editable.Projects.Default = append(pr.ProjectCards.ProjectNames(), pr.ProjectItems.ProjectTitles()...)
 	projectItems := map[string]string{}
@@ -229,10 +271,6 @@ func editRun(opts *EditOptions) error {
 		}
 	}
 
-	httpClient, err := opts.HttpClient()
-	if err != nil {
-		return err
-	}
 	apiClient := api.NewClientFromHTTP(httpClient)
 
 	opts.IO.StartProgressIndicator()
